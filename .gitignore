@@ -1,0 +1,36 @@
+# --- Secrets / env files ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# --- FastAPI / logs ---
+*.log
+
+# --- Node / Vite ---
+node_modules/
+dist/
+build/
+*.local
+
+# --- OS / Editor ---
+.DS_Store
+.idea/
+.vscode/
+
