@@ -150,6 +150,38 @@ def make_seat_change_decision(
     Returns keys that can be merged into the `extracted` dict passed to the report generator.
     """
 
+    # --- DEMO / ASSUMPTION OVERRIDE -------------------------------------------------
+    # For demo flows, the chat assistant can store explicit user assumptions in
+    # intake['_assumption_overrides']. If the user forces a preferred seat under an
+    # "assume ..." message, we must not re-raise "intervention_required" on report
+    # regeneration.
+    overrides = intake.get('_assumption_overrides') or {}
+    if isinstance(overrides, dict):
+        forced = overrides.get('preferred_seat') or overrides.get('force_preferred_seat')
+        if forced and str(forced).strip():
+            forced = _clean(str(forced))
+            # Keep it transparent: we note that this is assumption-driven.
+            # We intentionally do not require citations here because the user is
+            # explicitly overriding grounding requirements for the demo.
+            return {
+                "should_change_seat": "yes",
+                "preferred_seat": forced,
+                "alternative_seat": None,
+                "rationale": [
+                    "Demo assumption override applied: user requested a specific preferred seat.",
+                    "This recommendation is scenario-driven and may not be fully grounded in the uploaded excerpts.",
+                ],
+                "jurisdiction_notes": {
+                    forced: {
+                        "pros": ["Selected to match the user-provided demo scenario."],
+                        "cons": ["Grounding evidence may be incomplete for this scenario."],
+                    }
+                },
+                "alternative_circumstances": "If the assumed conditions do not hold, regenerate without the override for a grounded comparison.",
+                "missing_info": [],
+                "citations": [],
+            }
+
     # If no OpenAI key, we cannot generate a decision.
     if not settings.openai_api_key:
         return {

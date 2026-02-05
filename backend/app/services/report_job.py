@@ -105,6 +105,24 @@ def _merge_into_intake(project: Dict[str, Any], extracted: Dict[str, Any]) -> Di
     return intake if changed else project.get('intake') or {}
 
 
+def _effective_intake(intake: Dict[str, Any]) -> Dict[str, Any]:
+    """Return intake with any stored assumption overrides applied.
+
+    Chat can store explicit user scenario values under intake['_assumption_overrides'].
+    The report generator must treat those as authoritative (for demo flows).
+    """
+    if not isinstance(intake, dict):
+        return {}
+    overrides = intake.get('_assumption_overrides')
+    if not isinstance(overrides, dict) or not overrides:
+        return intake
+    merged = dict(intake)
+    for k, v in overrides.items():
+        # Keep private/meta keys intact; only overwrite explicit fields.
+        merged[k] = v
+    return merged
+
+
 def generate_report_for_project(project_id: str, user_id: str) -> None:
     """Generate a DOCX report and attach it to the project.
 
@@ -174,7 +192,8 @@ def generate_report_for_project(project_id: str, user_id: str) -> None:
 
         # 4) Generate a grounded decision for Section 3 (Conclusion)
         try:
-            decision = make_seat_change_decision(docs_text=docs_text, intake=(project.get("intake") or {}), extracted=extracted)
+            effective = _effective_intake(project.get("intake") or {})
+            decision = make_seat_change_decision(docs_text=docs_text, intake=effective, extracted=extracted)
             if isinstance(decision, dict):
                 extracted.update(decision)
                 # Persist the decision so chat can explain "Intervention Required" more concretely.
@@ -211,11 +230,15 @@ def generate_report_for_project(project_id: str, user_id: str) -> None:
         )
 
         # Mark intervention if we still don't have the basics
-        intake = project.get('intake') or {}
+        raw_intake = project.get('intake') or {}
+        intake = _effective_intake(raw_intake)
         required = ['current_seat', 'proposed_seats', 'arbitration_agreement_text']
         missing_basics = any((not intake.get(k) and not extracted.get(k)) for k in required)
         decision_flag = extracted.get('should_change_seat')
-        needs_intervention = missing_basics or (decision_flag == 'intervention_required')
+        # If the user explicitly forced a preferred seat for a demo, do not re-raise intervention.
+        overrides = (raw_intake.get('_assumption_overrides') or {}) if isinstance(raw_intake, dict) else {}
+        forced = overrides.get('preferred_seat') or overrides.get('force_preferred_seat')
+        needs_intervention = (missing_basics or (decision_flag == 'intervention_required')) and not (forced and str(forced).strip())
 
         ts = datetime.now(timezone.utc).isoformat()
         sb.table('projects').update({

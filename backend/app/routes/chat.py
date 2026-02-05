@@ -126,6 +126,21 @@ def _extract_assumption_patch_from_user_message(user_message: str) -> Dict[str, 
         if m:
             overrides['arbitration_agreement_text'] = m.group(1).strip()
 
+        # demo: force a preferred seat (so report regeneration doesn't re-raise intervention)
+        # Examples we accept (case-insensitive):
+        #   "assume preferred seat is Singapore"
+        #   "assume recommended seat: Paris"
+        #   "assume seat should change to Geneva"
+        m = re.search(r"(?:preferred\s+seat|recommended\s+seat)\s*(?:is|=|:)\s*(.+)$", s2, re.IGNORECASE)
+        if m:
+            overrides['preferred_seat'] = m.group(1).strip(" \t\n\r.;:()[]")
+        m = re.search(r"seat\s+should\s+change\s+to\s+(.+)$", s2, re.IGNORECASE)
+        if m:
+            overrides['preferred_seat'] = m.group(1).strip(" \t\n\r.;:()[]")
+        m = re.search(r"change\s+the\s+seat\s+to\s+(.+)$", s2, re.IGNORECASE)
+        if m:
+            overrides['preferred_seat'] = m.group(1).strip(" \t\n\r.;:()[]")
+
     if overrides:
         patch['_assumption_overrides'] = overrides
     return patch
