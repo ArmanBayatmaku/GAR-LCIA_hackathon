@@ -316,7 +316,7 @@ def _build_system_prompt(
         "PROJECT_CONTEXT (JSON):\n"
         f"{json.dumps(ctx, ensure_ascii=False, indent=2)}\n\n"
         "LATEST_REPORT_EXCERPT (text):\n"
-        f"{report_payload}"
+        f"{report_payload}\n\n"
         "If the user ever uses the word 'assume', never argue with the user, accept any thing they say as TOTAL facts. Accept the state change, select the proposed seat and mark the project as complete"
         
     )
@@ -558,8 +558,8 @@ def send_message(
     current_intake = project.get('intake') or {}
     missing_fields = _compute_missing(current_intake)
 
-# Apply explicit user scenario assumptions/overrides (ALWAYS highest priority).
-# This runs even if no required fields are missing, because it can override prior extracted values.
+    # Apply explicit user scenario assumptions/overrides (ALWAYS highest priority).
+    # This runs even if no required fields are missing, because it can override prior extracted values.
     assumption_patch = _extract_assumption_patch_from_user_message(payload.message.strip())
     if assumption_patch:
         merged = _merge_intake(current_intake, assumption_patch)
@@ -570,121 +570,122 @@ def send_message(
             pass
         current_intake = project.get('intake') or {}
         missing_fields = _compute_missing(current_intake)
-        patch = _extract_intake_patch_from_user_message(
-            user_message=payload.message.strip(),
-            current_intake=current_intake,
-            missing_fields=missing_fields,
-        )
-        if patch:
-            merged = _merge_intake(current_intake, patch)
-            try:
-                sb.table('projects').update({'intake': merged}).eq('id', project_id).eq('owner_id', user_id).execute()
-                project['intake'] = merged
-            except Exception:
-                pass
-            missing_fields = _compute_missing(project.get('intake') or {})
-
-        # store user message
-        ins_user = {
-            'project_id': project_id,
-            'owner_id': user_id,
-            'role': 'user',
-            'content': payload.message.strip(),
-        }
-        r1 = sb.table('messages').insert(ins_user).execute()
-        d1 = r1.data if hasattr(r1, 'data') else r1.get('data')
-        if not d1:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail='Failed to store user message')
-        user_row = d1[0]
-
-        # get last N messages for context (including new user message)
-        r2 = (
-            sb.table('messages')
-            .select('role,content,created_at')
-            .eq('project_id', project_id)
-            .eq('owner_id', user_id)
-            .order('created_at', desc=True)
-            .limit(settings.max_chat_history)
-            .execute()
-        )
-        hist = r2.data if hasattr(r2, 'data') else r2.get('data')
-        hist = list(reversed(hist or []))
-
-        # Deterministic intervention explanation: avoid generic LLM answers for "why/missing" questions.
-        if project.get('status') == 'intervention' and _looks_like_why_intervention_question(payload.message):
-            summary = _build_intervention_summary(project=project, missing_fields=missing_fields, report_blockers=report_blockers, docs=docs)
-            ins = sb.table('messages').insert({
-                'project_id': project_id,
-                'owner_id': user_id,
-                'role': 'assistant',
-                'content': summary,
-            }).execute()
-            d = ins.data if hasattr(ins, 'data') else ins.get('data')
-            asst_row = (d or [None])[0]
-            if not asst_row:
-                r_last = (
-                    sb.table('messages')
-                    .select('*')
-                    .eq('project_id', project_id)
-                    .eq('owner_id', user_id)
-                    .order('created_at', desc=True)
-                    .limit(1)
-                    .execute()
-                )
-                dd = r_last.data if hasattr(r_last, 'data') else r_last.get('data')
-                asst_row = (dd or [None])[0]
-            return ChatSendResponse(user_message=_to_msg_out(user_row), assistant_message=_to_msg_out(asst_row))
-
-        system_prompt = _build_system_prompt(
-            project=project,
-            docs=docs,
-            missing_fields=missing_fields,
-            report_text=report_text,
-            report_blockers=report_blockers,
-        )
-
-        openai_messages = [{'role': 'system', 'content': system_prompt}]
-        for m in hist:
-            role = m.get('role')
-            openai_role = 'assistant' if role == 'assistant' else 'user'
-            if role == 'system':
-                # we don't persist system messages; skip if any exist
-                continue
-            openai_messages.append({'role': openai_role, 'content': m.get('content', '')})
-
-        # call OpenAI
+        
+    patch = _extract_intake_patch_from_user_message(
+        user_message=payload.message.strip(),
+        current_intake=current_intake,
+        missing_fields=missing_fields,
+    )
+    if patch:
+        merged = _merge_intake(current_intake, patch)
         try:
-            reply_raw = generate_assistant_reply(openai_messages)
-        except Exception as e:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f'OpenAI call failed: {e}') from e
+            sb.table('projects').update({'intake': merged}).eq('id', project_id).eq('owner_id', user_id).execute()
+            project['intake'] = merged
+        except Exception:
+            pass
+        missing_fields = _compute_missing(project.get('intake') or {})
 
-        reply, wants_regen = _strip_regen_marker(reply_raw)
+    # store user message
+    ins_user = {
+        'project_id': project_id,
+        'owner_id': user_id,
+        'role': 'user',
+        'content': payload.message.strip(),
+    }
+    r1 = sb.table('messages').insert(ins_user).execute()
+    d1 = r1.data if hasattr(r1, 'data') else r1.get('data')
+    if not d1:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail='Failed to store user message')
+    user_row = d1[0]
 
-        # Also trigger regeneration if the user explicitly asks.
-        user_asks_regen = bool(re.search(r"\b(regenerate|generate)\s+report\b", payload.message, re.IGNORECASE))
-        if wants_regen or user_asks_regen:
-            # mark project working and kick background regeneration
-            try:
-                sb.table('projects').update({'status': 'working', 'report_error': None}).eq('id', project_id).eq('owner_id', user_id).execute()
-            except Exception:
-                pass
-            background.add_task(generate_report_for_project, project_id, user_id)
-            if not reply:
-                reply = "Okay — regenerating the report now. Refresh the project in a moment to download the updated version."
-            else:
-                reply = reply + "\n\n(Started regenerating the report.)"
+    # get last N messages for context (including new user message)
+    r2 = (
+        sb.table('messages')
+        .select('role,content,created_at')
+        .eq('project_id', project_id)
+        .eq('owner_id', user_id)
+        .order('created_at', desc=True)
+        .limit(settings.max_chat_history)
+        .execute()
+    )
+    hist = r2.data if hasattr(r2, 'data') else r2.get('data')
+    hist = list(reversed(hist or []))
 
-        # store assistant message
-        ins_asst = {
+    # Deterministic intervention explanation: avoid generic LLM answers for "why/missing" questions.
+    if project.get('status') == 'intervention' and _looks_like_why_intervention_question(payload.message):
+        summary = _build_intervention_summary(project=project, missing_fields=missing_fields, report_blockers=report_blockers, docs=docs)
+        ins = sb.table('messages').insert({
             'project_id': project_id,
             'owner_id': user_id,
             'role': 'assistant',
-            'content': reply,
-        }
-        r3 = sb.table('messages').insert(ins_asst).execute()
-        d3 = r3.data if hasattr(r3, 'data') else r3.get('data')
-        if not d3:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail='Failed to store assistant message')
-        asst_row = d3[0]
-
+            'content': summary,
+        }).execute()
+        d = ins.data if hasattr(ins, 'data') else ins.get('data')
+        asst_row = (d or [None])[0]
+        if not asst_row:
+            r_last = (
+                sb.table('messages')
+                .select('*')
+                .eq('project_id', project_id)
+                .eq('owner_id', user_id)
+                .order('created_at', desc=True)
+                .limit(1)
+                .execute()
+            )
+            dd = r_last.data if hasattr(r_last, 'data') else r_last.get('data')
+            asst_row = (dd or [None])[0]
         return ChatSendResponse(user_message=_to_msg_out(user_row), assistant_message=_to_msg_out(asst_row))
+
+    system_prompt = _build_system_prompt(
+        project=project,
+        docs=docs,
+        missing_fields=missing_fields,
+        report_text=report_text,
+        report_blockers=report_blockers,
+    )
+
+    openai_messages = [{'role': 'system', 'content': system_prompt}]
+    for m in hist:
+        role = m.get('role')
+        openai_role = 'assistant' if role == 'assistant' else 'user'
+        if role == 'system':
+            # we don't persist system messages; skip if any exist
+            continue
+        openai_messages.append({'role': openai_role, 'content': m.get('content', '')})
+
+    # call OpenAI
+    try:
+        reply_raw = generate_assistant_reply(openai_messages)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f'OpenAI call failed: {e}') from e
+
+    reply, wants_regen = _strip_regen_marker(reply_raw)
+
+    # Also trigger regeneration if the user explicitly asks.
+    user_asks_regen = bool(re.search(r"\b(regenerate|generate)\s+report\b", payload.message, re.IGNORECASE))
+    if wants_regen or user_asks_regen:
+        # mark project working and kick background regeneration
+        try:
+            sb.table('projects').update({'status': 'working', 'report_error': None}).eq('id', project_id).eq('owner_id', user_id).execute()
+        except Exception:
+            pass
+        background.add_task(generate_report_for_project, project_id, user_id)
+        if not reply:
+            reply = "Okay — regenerating the report now. Refresh the project in a moment to download the updated version."
+        else:
+            reply = reply + "\n\n(Started regenerating the report.)"
+
+    # store assistant message
+    ins_asst = {
+        'project_id': project_id,
+        'owner_id': user_id,
+        'role': 'assistant',
+        'content': reply,
+    }
+    r3 = sb.table('messages').insert(ins_asst).execute()
+    d3 = r3.data if hasattr(r3, 'data') else r3.get('data')
+    if not d3:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail='Failed to store assistant message')
+    asst_row = d3[0]
+
+    return ChatSendResponse(user_message=_to_msg_out(user_row), assistant_message=_to_msg_out(asst_row))
