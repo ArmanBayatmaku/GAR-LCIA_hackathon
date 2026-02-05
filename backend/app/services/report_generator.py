@@ -74,7 +74,6 @@ def build_seat_report_docx(
     add_row('Institution / rules', intake.get('institution_rules') or extracted.get('institution_rules'))
     add_row('Governing law (contract)', intake.get('governing_law') or extracted.get('governing_law'))
     add_row('Urgency (interim measures)', intake.get('urgency') or extracted.get('urgency'))
-    add_row('Parties / assets location', intake.get('parties_assets_where') or extracted.get('parties_assets_where'))
 
     clause = intake.get('arbitration_agreement_text') or extracted.get('arbitration_agreement_text')
     if clause:
