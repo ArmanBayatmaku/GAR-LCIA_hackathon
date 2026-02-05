@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { api } from "./lib/api";
 import { clearSession, getAccessToken, isGuestMode } from "./lib/auth";
 
-const HERO_TITLE = "AI for changing seat in Arbitration";
+const HERO_TITLE = "AI for Changing the Seat of Arbitration";
 const HERO_TEXT = `Our AI tool simplifies the complex process of changing the seat of arbitration. It instantly analyzes your existing arbitration clause, related documents and peculiarities of your case.
 
 This reduces risk, saves significant time, and lowers costs associated with this critical change.
