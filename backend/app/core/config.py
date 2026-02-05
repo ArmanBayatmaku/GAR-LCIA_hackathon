@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
+from pydantic import AliasChoices
 
 
 class Settings(BaseSettings):
@@ -19,13 +21,15 @@ class Settings(BaseSettings):
     storage_bucket: str = 'project-files'
 
     # CORS
-    cors_origins: str = 'http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000,http://localhost:8001,http://127.0.0.1:8001'
-
+    cors_origins: str = Field(
+        default='http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000,http://localhost:8001,http://127.0.0.1:8001',
+        validation_alias=AliasChoices('CORS_ALLOWED_ORIGINS', 'CORS_ORIGINS', 'cors_origins'),
+    )
     # Chat
     max_chat_history: int = 20
 
     def cors_origin_list(self) -> list[str]:
-        return [o.strip() for o in self.cors_origins.split(',') if o.strip()]
+        return [o.strip().rstrip('/') for o in self.cors_origins.split(',') if o.strip()]
 
 
 settings = Settings()
