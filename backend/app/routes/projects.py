@@ -1,18 +1,33 @@
 from __future__ import annotations
 
 import json
+import io
 import mimetypes
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import PlainTextResponse
+from docx import Document as DocxDocument
 
 from ..core.config import settings
 from ..core.security import get_current_user_id
 from ..core.supabase import get_admin_client
 from ..schemas import DocumentOut, ProjectCreate, ProjectOut, ProjectUpdate
+from ..services.report_job import generate_report_for_project
 
 router = APIRouter(prefix='/projects', tags=['projects'])
+
+
+def _attach_report_url(row: dict) -> dict:
+    """Add report_url if a report_path exists (bucket is assumed public for hackathon)."""
+    try:
+        if row.get('report_bucket') and row.get('report_path'):
+            sb = get_admin_client()
+            row['report_url'] = sb.storage.from_(row['report_bucket']).get_public_url(row['report_path'])
+    except Exception:
+        pass
+    return row
 
 
 def _project_or_404(project_id: str, user_id: str) -> dict:
@@ -32,7 +47,11 @@ def _project_or_404(project_id: str, user_id: str) -> dict:
 
 
 @router.post('', response_model=ProjectOut)
-def create_project(payload: ProjectCreate, user_id: str = Depends(get_current_user_id)):
+def create_project(
+    payload: ProjectCreate,
+    background: BackgroundTasks,
+    user_id: str = Depends(get_current_user_id),
+):
     sb = get_admin_client()
     status_value = payload.status or 'working'
     insert = {
@@ -46,17 +65,23 @@ def create_project(payload: ProjectCreate, user_id: str = Depends(get_current_us
     data = res.data if hasattr(res, 'data') else res.get('data')
     if not data:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail='Failed to create project')
-    return data[0]
+    project = data[0]
+
+    # Fire-and-forget report generation. This will update status and attach report_path when done.
+    background.add_task(generate_report_for_project, project['id'], user_id)
+
+    return _attach_report_url(project)
 
 
 @router.post('/with-documents', response_model=ProjectOut)
 def create_project_with_documents(
+    background: BackgroundTasks,
+    user_id: str = Depends(get_current_user_id),
     title: str = Form(...),
     description: Optional[str] = Form(None),
     status_value: Optional[str] = Form(None),
     intake_json: Optional[str] = Form(None),
     files: Optional[List[UploadFile]] = File(None),
-    user_id: str = Depends(get_current_user_id),
 ):
     """Create a project and upload documents in one call.
 
@@ -118,7 +143,10 @@ def create_project_with_documents(
             }
             sb.table('documents').insert(doc_row).execute()
 
-    return project
+    # Generate report after docs are uploaded
+    background.add_task(generate_report_for_project, project['id'], user_id)
+
+    return _attach_report_url(project)
 
 
 @router.get('', response_model=list[ProjectOut])
@@ -126,12 +154,13 @@ def list_projects(user_id: str = Depends(get_current_user_id)):
     sb = get_admin_client()
     res = sb.table('projects').select('*').eq('owner_id', user_id).order('created_at', desc=True).execute()
     data = res.data if hasattr(res, 'data') else res.get('data')
-    return data or []
+    rows = data or []
+    return [_attach_report_url(r) for r in rows]
 
 
 @router.get('/{project_id}', response_model=ProjectOut)
 def get_project(project_id: str, user_id: str = Depends(get_current_user_id)):
-    return _project_or_404(project_id, user_id)
+    return _attach_report_url(_project_or_404(project_id, user_id))
 
 
 @router.patch('/{project_id}', response_model=ProjectOut)
@@ -155,7 +184,60 @@ def update_project(project_id: str, payload: ProjectUpdate, user_id: str = Depen
     data = res.data if hasattr(res, 'data') else res.get('data')
     if not data:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail='Failed to update project')
-    return data[0]
+    return _attach_report_url(data[0])
+
+
+@router.get('/{project_id}/report')
+def get_project_report(project_id: str, user_id: str = Depends(get_current_user_id)):
+    """Return a public URL for the latest report (bucket assumed public for hackathon)."""
+    project = _project_or_404(project_id, user_id)
+    if not project.get('report_bucket') or not project.get('report_path'):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Report not generated')
+    sb = get_admin_client()
+    url = sb.storage.from_(project['report_bucket']).get_public_url(project['report_path'])
+    return {'download_url': url}
+
+
+def _docx_to_text(docx_bytes: bytes) -> str:
+    """Extract a readable plain-text preview from a DOCX."""
+    try:
+        doc = DocxDocument(io.BytesIO(docx_bytes))
+        lines: List[str] = []
+        for p in doc.paragraphs:
+            t = (p.text or '').strip()
+            if t:
+                lines.append(t)
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+@router.get('/{project_id}/report/text', response_class=PlainTextResponse)
+def get_project_report_text(project_id: str, user_id: str = Depends(get_current_user_id)):
+    """Return a plain-text preview of the latest generated report."""
+    project = _project_or_404(project_id, user_id)
+    if not project.get('report_bucket') or not project.get('report_path'):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Report not generated')
+
+    sb = get_admin_client()
+    try:
+        docx_bytes = sb.storage.from_(project['report_bucket']).download(project['report_path'])
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail='Failed to fetch report from storage')
+
+    text = _docx_to_text(docx_bytes) if docx_bytes else ""
+    if not text:
+        # Still return 200 so the frontend can fall back to download.
+        return ""
+    return text
+
+
+@router.post('/{project_id}/report/regenerate')
+def regenerate_report(project_id: str, background: BackgroundTasks, user_id: str = Depends(get_current_user_id)):
+    """Regenerate the report for a project (e.g., after uploading documents)."""
+    _project_or_404(project_id, user_id)
+    background.add_task(generate_report_for_project, project_id, user_id)
+    return {'ok': True}
 
 
 @router.delete('/{project_id}')

@@ -49,6 +49,11 @@ class ProjectOut(BaseModel):
     intake: Dict[str, Any]
     created_at: str
     updated_at: str
+    # Optional report fields (generated after project creation)
+    report_url: Optional[str] = None
+    report_bucket: Optional[str] = None
+    report_path: Optional[str] = None
+    report_generated_at: Optional[str] = None
 
 
 class DocumentOut(BaseModel):

@@ -19,7 +19,7 @@ def get_current_user_id(token: str = Depends(get_access_token)) -> str:
     admin = get_admin_client()
     try:
         res = admin.auth.get_user(token)
-        user = getattr(res, 'user', None) or res.get('user') if isinstance(res, dict) else None
+        user = getattr(res, 'user', None) or (res.get('user') if isinstance(res, dict) else None)
         if not user:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid token')
         user_id = user.id if hasattr(user, 'id') else user.get('id')
